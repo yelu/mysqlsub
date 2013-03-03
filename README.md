@@ -1,4 +1,4 @@
 mysqlsub
 ========
 
-subscribe mysql change events via binlog.
+subscribe realtime mysql database changes via row-based replication binlog.
