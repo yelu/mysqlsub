@@ -6,7 +6,7 @@ Created on 2013-2-27
 
 import os
 import time
-os.sys.path.append("/home/yelu/mycode/MysqlSub/")
+os.sys.path.append("/home/yelu/mycode/mysqlsub/")
 import unittest
 from mysqlsub import source
 
