@@ -3,9 +3,8 @@
 
 import os
 import sys
-import re
 import logging
-import commands
+import traceback
 
 # config log
 if not os.path.exists("./log"):
@@ -68,4 +67,9 @@ def join_path(start_path, relative):
     abspath = os.path.abspath(relative)
     os.chdir(cwd)
     return abspath
+
+def get_trace_info():
+    t, v, tb = sys.exc_info()
+    res = traceback.format_exception(t, v, tb)
+    return "".join(res)
 

@@ -4,16 +4,19 @@
 from connection import Connection
 from tools import log
 from tools import open_cursor
+from tools import get_trace_info
 from mysql.connector import utils
 from mysql.connector.protocol import MySQLProtocol
 from mysql.connector.constants import ServerCmd
 from event import BinlogEvent
+import json
 
 class Source(object):
     def __init__(self, **kwargs):
         self._socket = None
         self._conf = kwargs
         self._conn = None
+        self._tables = {}
 
     def _query(self, sql):
         """
@@ -59,7 +62,7 @@ class Source(object):
         return res[0]
     
     def get_server_id(self):
-        return 1
+        return 123456
     
     def binlog_dump(self, log_file, offset):
         """
@@ -103,8 +106,39 @@ class Source(object):
     def next(self):
         packet = self._socket.recv()
         event = BinlogEvent(packet)
+        log.debug(str(event))
         if event.is_eof() or event.is_error():
             raise StopIteration
-        event.header.debug()
         return event
+    
+    def add_table(self, db, table, col):
+        if db not in self._tables:
+            self._tables[db] = {}
+        if table not in self._tables[db]:
+            self._tables[db][table] = {"columns_info":{}, "do_columns":{}}
+        for i in col:
+            if not isinstance(i, str):
+                log.warning("non-string col name.")
+                continue
+            if i not in self._tables[db][table]["do_columns"]:
+                self._tables[db][table]["do_columns"][i] = None
+        log.debug(json.dumps(self._tables))
+    
+    def get_columns_info(self):
+        for db, tables in self._tables.items():
+            for table, desc in tables.items():
+                try:
+                    sql = "show full columns from %s.%s" % (db, table)
+                    res = self._query(sql)
+                    for idx, field in enumerate(res):
+                        if field["Field"] in desc["do_columns"]:
+                            desc["columns_info"][idx] = \
+                            {"name":field["Field"], \
+                             "type":field["Type"], \
+                             "Default":field["Default"]}
+                except:
+                    log.warning(get_trace_info())
+                    continue
+                log.debug(json.dumps(self._tables))
+            
             

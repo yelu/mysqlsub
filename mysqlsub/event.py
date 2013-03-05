@@ -3,6 +3,8 @@
 
 from mysql.connector import utils
 from tools import log
+from tools import get_trace_info
+from constants import EventType
 
 """
 Binlog::EventHeader.
@@ -29,19 +31,19 @@ class EventHeader(object):
         self.log_pos = utils.read_int(buf[13:], 4)[1]
         self.flags = utils.read_int(buf[17:], 2)[1]
         
-    def debug(self):
-        import datetime
+    def __str__(self):
         import time
         t = time.localtime(self.timestamp)
         t_str = time.strftime("%Y-%m-%d %H:%M:%S", t)
-        log.debug("[timestamp:%s][event_type:0x%.2x][server_id:%d]"
-                  "[event_size:%d][log_pos:%d][flags:%d]" %
-                  (t_str,
-                  self.event_type,
-                  self.server_id,
-                  self.event_size,
-                  self.log_pos,
-                  self.flags))
+        res = "[timestamp:%s][event_type:0x%.2x][server_id:%u]" \
+                  "[event_size:%u][log_pos:%u][flags:0x%.4x]" % \
+                  (t_str, \
+                  self.event_type, \
+                  self.server_id, \
+                  self.event_size, \
+                  self.log_pos, \
+                  self.flags)
+        return res
 
 """
 Binlog packet.
@@ -50,24 +52,26 @@ Binlog packet.
 |                  +-------------------------+   
 |                  |  sequence number   3 : 1 |
 +============================================+
-| event_header     |                    4 : 1 |
+| OK/ERR/EOF       |                    4 : 1 |
 | event_header     |                    5 : X |
 +============================================+
 """
 
 class BinlogEvent(object):
     def __init__(self, packet):
-        self._body = packet[5:]
+        self._body = packet[4:]
         self.header = None
         try:
-            self.header = EventHeader(self._body[0:20])
+            self.header = EventHeader(self._body[1:21])
         except:
-            pass
+            msg = get_trace_info()
+            log.warning(msg)
         
     
     def is_eof(self):
         header = utils.read_int(self._body, 1)[1]
         if 0xfe == header:
+            log.debug("received eof packet.")
             return True
         else:
             return False
@@ -75,15 +79,42 @@ class BinlogEvent(object):
     def is_error(self):
         header = utils.read_int(self._body, 1)[1]
         if 0xff == header:
+            log.debug("received err packet.")
             return True
         else:
             return False
      
     def type(self):
         return self.header.event_type
+    
+    def __str__(self):
+        return self.header.__str__()
 
-    def dump(self):
+
+class TableMapEvent(BinlogEvent):
+    
+    def __init__(self, packet):
+        super(TableMapEvent, self).__init__(packet)
+        self._payload = packet[23:]
+        
+        # header
+        self._table_map = {}
+        head = self._payload
+        head, self.table_id = utils.read_int(head, 6)
+        head, self.flags = utils.read_int(head, 2)
+        head, db_name_len = utils.read_int(head, 1)
+        head, self._table_map["db"] = utils.read_bytes(head, db_name_len) + "0x00"
+        head, _ = utils.read_bytes(head, 1) #filler
+        head, table_name_len = utils.read_int(head, 1)
+        head, self._table_map["table"] = utils.read_bytes(head, table_name_len) + "0x00"
+        head, _ = utils.read_bytes(head, 1)
+        head, cols_cnt = utils.read_lc_string(head)
+    
+    @property
+    def table_map(self):
         pass
+        
+
 
 class RowsEvent(BinlogEvent):
     
@@ -91,12 +122,27 @@ class RowsEvent(BinlogEvent):
         super(RowsEvent, self).__init__(packet)
         self._payload = packet[23:]
         
+        head = self._payload
         # header
-        self.table_id = utils.read_int(self._payload, 6)[1]
-        self.flags = utils.read_int(utils.read_int(self._payload[6:], 2)[1], 2)[1]
+        head, self.table_id = utils.read_int(head, 6)
+        head, self.flags = utils.read_int(head, 2)
+        # with MySQL 5.6.x there will be other data.
         
         # body
-        self.number_of_columns = utils.read_lc_int(utils.read_int(self._payload[8:])[1])
+        head, self.number_of_columns = utils.read_lc_int(head)
+        columns_present_bitmap_len = (self.number_of_columns + 7) / 8
+        head, columns_present_bitmap1 = utils.read_int(head, 
+                                        columns_present_bitmap_len)
+        if self.header.event_type == EventType.UPDATE_ROWS_EVENT:
+            head, columns_present_bitmap2 = utils.read_int(head, 
+                                            columns_present_bitmap_len)
+        # read rows.
+        null_bitmap_len = (self.number_of_columns + 7) / 8;
+        head, null_bitmap = utils.read_int(head, null_bitmap_len)
+        row = {}
+        for i in range(self.number_of_columns):
+            is_null = True if ((null_bitmap[i/8] >> (i%8)) & 0x01) else False;
+            
         
         #self.columns = self.table_map[self.table_id].columns
 
