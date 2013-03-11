@@ -5,6 +5,8 @@ from mysql.connector import utils
 from tools import log
 from tools import get_trace_info
 from constants import EventType
+import json
+
 
 """
 Binlog::EventHeader.
@@ -62,7 +64,7 @@ class BinlogEvent(object):
         self._body = packet[4:]
         self.header = None
         try:
-            self.header = EventHeader(self._body[1:21])
+            self.header = EventHeader(self._body[1:20])
         except:
             msg = get_trace_info()
             log.warning(msg)
@@ -95,30 +97,37 @@ class TableMapEvent(BinlogEvent):
     
     def __init__(self, packet):
         super(TableMapEvent, self).__init__(packet)
-        self._payload = packet[23:]
+        self._payload = packet[24:]
         
         # header
-        self._table_map = {}
         head = self._payload
         head, self.table_id = utils.read_int(head, 6)
         head, self.flags = utils.read_int(head, 2)
         head, db_name_len = utils.read_int(head, 1)
-        head, self._table_map["db"] = utils.read_bytes(head, db_name_len) + "0x00"
+        head, self.db = utils.read_bytes(head, db_name_len)
+        self.db = str(self.db)
         head, _ = utils.read_bytes(head, 1) #filler
         head, table_name_len = utils.read_int(head, 1)
-        head, self._table_map["table"] = utils.read_bytes(head, table_name_len) + "0x00"
+        head, self.table = utils.read_bytes(head, table_name_len)
+        self.table = str(self.table)
         head, _ = utils.read_bytes(head, 1)
-        head, cols_cnt = utils.read_lc_string(head)
+        head, self.cols_cnt = utils.read_lc_int(head)
     
     @property
     def table_map(self):
-        pass
+        table_map = {"table_id":self.table_id, \
+                     "db":self.db, \
+                     "table":self.table, \
+                     "columns_cnt":self.cols_cnt}
+        return table_map
+    
+    def __str__(self):
+        return json.dumps(self.table_map)
         
-
 
 class RowsEvent(BinlogEvent):
     
-    def __init__(self, packet):
+    def __init__(self, packet, table_map, column_map):
         super(RowsEvent, self).__init__(packet)
         self._payload = packet[23:]
         
@@ -126,7 +135,7 @@ class RowsEvent(BinlogEvent):
         # header
         head, self.table_id = utils.read_int(head, 6)
         head, self.flags = utils.read_int(head, 2)
-        # with MySQL 5.6.x there will be other data.
+        # with MySQL 5.6.x there will be other data following.
         
         # body
         head, self.number_of_columns = utils.read_lc_int(head)
@@ -195,3 +204,15 @@ class QueryEvent(BinLogEvent):
         print("Execution time: %d" % (self.execution_time)) 
         print("Query: %s" % (self.query))
 """
+
+
+class EventMap:
+    map = {
+    EventType.TABLE_MAP_EVENT : TableMapEvent
+    }
+    
+    def get_event_type(self, t):
+        if t in self.__class__.map:
+            return self.__class__.map[t]
+        else:
+            return None

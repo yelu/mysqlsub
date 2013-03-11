@@ -8,7 +8,7 @@ from tools import get_trace_info
 from mysql.connector import utils
 from mysql.connector.protocol import MySQLProtocol
 from mysql.connector.constants import ServerCmd
-from event import BinlogEvent
+from event import *
 import json
 
 class Source(object):
@@ -109,6 +109,10 @@ class Source(object):
         log.debug(str(event))
         if event.is_eof() or event.is_error():
             raise StopIteration
+        event_type = EventMap().get_event_type(event.header.event_type)
+        if event_type:
+            event = event_type(packet)
+            log.debug(str(event))
         return event
     
     def add_table(self, db, table, col):
@@ -124,7 +128,7 @@ class Source(object):
                 self._tables[db][table]["do_columns"][i] = None
         log.debug(json.dumps(self._tables))
     
-    def get_columns_info(self):
+    def get_column_map(self):
         for db, tables in self._tables.items():
             for table, desc in tables.items():
                 try:
