@@ -96,7 +96,7 @@ class BinlogEvent(object):
 
 class TableMapEvent(BinlogEvent):
     
-    def __init__(self, packet):
+    def __init__(self, packet, table_map, conn):
         super(TableMapEvent, self).__init__(packet)
         self._payload = packet[24:]
         
