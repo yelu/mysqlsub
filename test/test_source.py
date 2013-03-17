@@ -93,7 +93,7 @@ class Test_table_map_event(unittest.TestCase):
                         user = "yelu",
                         password = "yelu123456")
         self._source.connect()
-        self._source.binlog_dump("mysql-bin.000299", 406207379)
+        self._source.binlog_dump("mysql-bin.000400", 4)
         
     def tearDown(self):
         self._source.disconnect()
