@@ -178,7 +178,7 @@ class RowsEvent(BinlogEvent):
             is_null = True if (null_bitmap>>i)&0x01 else False
             if is_null:
                 column = None
-            type == FieldType.TINY:
+            elif type == FieldType.TINY:
                 head, column = utils.read_int(head, 1)
             elif type == FieldType.SHORT:
                 head, column = utils.read_int(head, 2)
