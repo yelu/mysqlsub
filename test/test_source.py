@@ -66,6 +66,7 @@ class TestIter(unittest.TestCase):
             #time.sleep(1)
             pass
 
+'''
 class Test_get_columns_map(unittest.TestCase):
 
     def setUp(self):
@@ -81,10 +82,10 @@ class Test_get_columns_map(unittest.TestCase):
         self._source.disconnect()
 
     def testName(self):
-        self._source.get_column_map()
+        self._source.get_columns_info()
 
-'''         
-        
+
+'''                 
 class Test_table_map_event(unittest.TestCase):
 
     def setUp(self):
@@ -94,6 +95,7 @@ class Test_table_map_event(unittest.TestCase):
                         password = "yelu123456")
         self._source.connect()
         self._source.binlog_dump("mysql-bin.000400", 4)
+        self._source._query("select * from FC_Word.wordinfo0 limit 0;")
         
     def tearDown(self):
         self._source.disconnect()
@@ -102,7 +104,8 @@ class Test_table_map_event(unittest.TestCase):
         for i in self._source:
             time.sleep(1)
             pass        
-        
+'''
+    
 
 if __name__ == "__main__":
     #import sys;sys.argv = ['', 'Test.testName']

@@ -26,20 +26,23 @@ class Source(object):
             res = []
             with open_cursor(self._conn) as cursor:
                 cursor.execute(sql)
-                columns = tuple([d[0] for d in cursor.description])
+                columns_desc = cursor.description
+                columns = tuple([d[0] for d in columns_desc])
                 for row in cursor:
                     res.append(dict(zip(columns, row)))
-            return res
+            return res, columns_desc
         except:
             self.disconnect()
             self.connect()
             res = []
             with open_cursor(self._conn) as cursor:
                 cursor.execute(sql)
-                columns = tuple([d[0] for d in cursor.description])
+                columns_desc = cursor.description
+                columns = tuple([d[0] for d in columns_desc])
+                print cursor.description
                 for row in cursor:
                     res.append(dict(zip(columns, row)))
-            return res
+            return res, columns_desc
         
     def connect(self):
         """
@@ -57,7 +60,7 @@ class Source(object):
         self._socket = None
 
     def show_master_status(self):
-        res = self._query("show master status;")
+        res, _ = self._query("show master status;")
         print res
         return res[0]
     
@@ -119,7 +122,8 @@ class Source(object):
         if db not in self._tables:
             self._tables[db] = {}
         if table not in self._tables[db]:
-            self._tables[db][table] = {"columns_info":{}, "do_columns":{}}
+            self._tables[db][table] = {"columns_info":{}, "do_columns":{}, 
+                                       "pos_map":{}}
         for i in col:
             if not isinstance(i, str):
                 log.warning("non-string col name.")
@@ -128,18 +132,33 @@ class Source(object):
                 self._tables[db][table]["do_columns"][i] = None
         log.debug(json.dumps(self._tables))
     
-    def get_column_map(self):
+    def get_full_columns(self):
         for db, tables in self._tables.items():
             for table, desc in tables.items():
                 try:
                     sql = "show full columns from %s.%s" % (db, table)
-                    res = self._query(sql)
+                    res, _ = self._query(sql)
                     for idx, field in enumerate(res):
                         if field["Field"] in desc["do_columns"]:
                             desc["columns_info"][idx] = \
                             {"name":field["Field"], \
                              "type":field["Type"], \
                              "Default":field["Default"]}
+                except:
+                    log.warning(get_trace_info())
+                    continue
+                log.debug(json.dumps(self._tables))
+    
+    def get_columns_info(self):
+        for db, tables in self._tables.items():
+            for table, desc in tables.items():
+                try:
+                    sql = "select * from %s.%s limit 0,0" % (db, table)
+                    res, columns_desc = self._query(sql)
+                    for idx, field in enumerate(columns_desc):
+                        if field[0] in desc["do_columns"]:
+                            desc["columns_info"][field[0]] = field
+                            desc["pos_map"][idx] = field[0]
                 except:
                     log.warning(get_trace_info())
                     continue
