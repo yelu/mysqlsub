@@ -1,2 +1,6 @@
 eclipse.preferences.version=1
+encoding//mysqlsub/column.py=utf-8
+encoding//mysqlsub/connection.py=utf-8
+encoding//mysqlsub/event.py=utf-8
+encoding//mysqlsub/source.py=utf-8
 encoding/<project>=UTF-8

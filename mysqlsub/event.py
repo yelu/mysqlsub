@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 #coding:utf-8
 
-from mysql.connector import utils
 from tools import log
 from tools import get_trace_info
 from constants import EventType
 from mysql.connector.constants import FieldType
 from mysql.connector.conversion import MySQLConverter
+import utils 
 import json
 import time
 import struct
@@ -96,39 +96,53 @@ class BinlogEvent(object):
 
 class TableMapEvent(BinlogEvent):
     
-    def __init__(self, packet, table_map, conn):
+    def __init__(self, packet, table_map, table_subscribed, ctl_conn):
         super(TableMapEvent, self).__init__(packet)
         self._payload = packet[24:]
+        self._ctl_conn = ctl_conn
         
         # header
         head = self._payload
         head, self.table_id = utils.read_int(head, 6)
         head, self.flags = utils.read_int(head, 2)
-        head, db_name_len = utils.read_int(head, 1)
-        head, self.db = utils.read_bytes(head, db_name_len)
-        self.db = str(self.db)
+        head, schema_name_len = utils.read_int(head, 1)
+        head, self.schema = utils.read_bytes(head, schema_name_len)
+        self.schema = str(self.schema)
         head, _ = utils.read_bytes(head, 1) #filler
         head, table_name_len = utils.read_int(head, 1)
         head, self.table = utils.read_bytes(head, table_name_len)
         self.table = str(self.table)
         head, _ = utils.read_bytes(head, 1)
         head, self.columns_cnt = utils.read_lc_int(head)
-        head, columns_type = utils.read_bytes(head, self.columns_cnt)
-        self.columns_type = []
+        head, column_types = utils.read_bytes(head, self.columns_cnt)
+        self.column_types = []
         for i in range(0, self.columns_cnt):
-            self.columns_type.append(ord(columns_type[i]))
-        head, self.column_schema = utils.read_lc_string(head)
+            self.column_types.append(ord(column_types[i]))
+        #head, self.column_schema = utils.read_lc_string(head)
+        
+        # add or modify table map.
+        if self.table_id not in table_map:
+            table_map[self.table_id] = {"schema":None, "table":None, "column_schemas":[]}
+        table_map[self.table_id]["schema"] = self.schema
+        table_map[self.table_id]["table"] = self.table
+        
+        if self.schema in table_subscribed and self.table in table_subscribed[self.schema]:
+            table_map[self.table_id]["column_schemas"] = \
+               self.__get_table_informations(self.schema, self.table)
+            
+    def __get_table_informations(self, schema, table):
+        sql = '''SELECT * FROM information_schema.columns WHERE table_schema="%s" AND table_name="%s";''', (schema, table)
+        res, _ = self._ctl_conn.query(sql)
+        return res
     
     @property
     def table_map(self):
         table_map = {"table_id":self.table_id, \
-                     "db":self.db, \
+                     "schema":self.schema, \
                      "table":self.table, \
-                     "columns_cnt":self.columns_cnt, \
-                     "columns_type":self.columns_type
+                     "column_cnt":self.columns_cnt, \
+                     "column_types":self.columns_type
                      }
-        #"columns_schema":self.column_schema
-        print self.column_schema
         return table_map
     
     def __str__(self):
@@ -137,9 +151,11 @@ class TableMapEvent(BinlogEvent):
 
 class RowsEvent(BinlogEvent):
     
-    def __init__(self, packet, table_map, column_map):
+    def __init__(self, packet, table_map, table_subscribed):
         super(RowsEvent, self).__init__(packet)
         self._payload = packet[23:]
+        self._table_map = table_map
+        self._table_subscribed = table_subscribed
         
         head = self._payload
         # header
@@ -169,64 +185,76 @@ class RowsEvent(BinlogEvent):
         #self.schema = self.table_map[self.table_id].schema
         #self.table = self.table_map[self.table_id].table
         
-    def _read_columns(self, buf, null_bitmap, columns_cnt, columns_info):
+    def __read_columns(self, buf, null_bitmap, column_schemas):
         columns = []
         head = buf
-        for i in range(0, columns_cnt):
-            column = None
-            type = columns_info["columns_info"][columns_info["pos_map"][i+1]][1]
-            is_null = True if (null_bitmap>>i)&0x01 else False
-            if is_null:
-                column = None
+        for i in xrange(0, len(columns)):
+            schema = column_schemas[i]
+            type = schema["REAL_TYPE"]
+            column = {"type":type, "value":None }
+            null = True if (null_bitmap[i/8]>>(i%8))&0x01 else False
+            unsigned = column_schemas[i]["IS_UNSIGNED"]
+            if null:
+                column["value"] = None
             elif type == FieldType.TINY:
-                head, column = utils.read_int(head, 1)
+                if unsigned:
+                    head, columns["value"] = utils.read_int(head, 1)
+                else:
+                    head, columns["value"] = utils.read_signed_int(head, 1)
             elif type == FieldType.SHORT:
-                head, column = utils.read_int(head, 2)
+                if unsigned:
+                    head, columns["value"] = utils.read_int(head, 2)
+                else:
+                    head, columns["value"] = utils.read_signed_int(head, 2)
             elif type == FieldType.LONG:
-                head, column = utils.read_int(head, 4)
+                if unsigned:
+                    head, columns["value"] = utils.read_int(head, 4)
+                else:
+                    head, columns["value"] = utils.read_signed_int(head, 4)
             elif type == FieldType.INT24:
-                head, column = utils.read_int(head, 3)
+                if unsigned:
+                    head, columns["value"] = utils.read_uint24(head)
+                else:
+                    head, columns["value"] = utils.read_int24(head)
             elif type == FieldType.FLOAT:
-                head, column = utils.read_bytes(head, 4)
-                column = struct.unpack('f', column)
+                head, columns["value"] = utils.read_float(head)
             elif type == FieldType.DOUBLE:
-                head, column = utils.read_bytes(head, 8)
-                column = struct.unpack('d', column)
-            elif type == FieldType.VARCHAR or type == FieldType.STRING:
-                head, column = utils.read_lc_string(head)
-            elif column.type == FieldType.NEWDECIMAL:
-                #head, cloumn = utils.
+                head, columns["value"] = utils.read_double(head)
+            elif type == FieldType.VARCHAR or column.type == FieldType.STRING:
+                if schema["MAX_LENGTH"] > 255:
+                    head, columns["value"] = utils.read_lc_pascal_string(buf, 2)
+                else:
+                    head, columns["value"] = utils.read_lc_pascal_string(buf, 1)
+            elif type == FieldType.NEWDECIMAL:
                 values[name] = self.__read_new_decimal(column)
-            elif column.type == FieldType.BLOB:
+            elif type == FieldType.BLOB:
                 values[name] = self.__read_string(column.length_size, column)
-            elif column.type == FieldType.DATETIME:
+            elif type == FieldType.DATETIME:
                 values[name] = self.__read_datetime()
-            elif column.type == FIELD_TYPE.TIME:
+            elif type == FieldType.TIME:
                 values[name] = self.__read_time()
-            elif column.type == FIELD_TYPE.DATE:
+            elif type == FieldType.DATE:
                 values[name] = self.__read_date()
-            elif column.type == FIELD_TYPE.TIMESTAMP:
+            elif type == FieldType.TIMESTAMP:
                 values[name] = datetime.datetime.fromtimestamp(self.packet.read_uint32())
-            elif column.type == FIELD_TYPE.LONGLONG:
+            elif type == FieldType.LONGLONG:
                 if unsigned:
                     values[name] = self.packet.read_uint64()
                 else:
                     values[name] = self.packet.read_int64()
-            elif column.type == FIELD_TYPE.YEAR:
+            elif type == FieldType.YEAR:
                 values[name] = self.packet.read_uint8() + 1900
-            elif column.type == FIELD_TYPE.ENUM:
+            elif type == FieldType.ENUM:
                 values[name] = column.enum_values[self.packet.read_uint_by_size(column.size) - 1]
-            elif column.type == FIELD_TYPE.SET:
+            elif type == FieldType.SET:
                 values[name] = column.set_values[self.packet.read_uint_by_size(column.size) - 1]
-            elif column.type == FIELD_TYPE.BIT:
+            elif type == FieldType.BIT:
                 values[name] = self.__read_bit(column)
-            elif column.type == FIELD_TYPE.GEOMETRY:
+            elif type == FieldType.GEOMETRY:
                 values[name] = self.packet.read_length_coded_pascal_string(column.length_size)
             else:
                 raise NotImplementedError("Unknown MySQL column type: %d" % (column.type))
-                MySQLConverter.to_python(self, vtype, value)
         return values
-        pass
 
 
 """
