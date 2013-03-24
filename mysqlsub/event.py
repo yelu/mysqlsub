@@ -10,6 +10,7 @@ import utils
 import json
 import time
 import struct
+import datetime
 
 
 """
@@ -100,41 +101,88 @@ class TableMapEvent(BinlogEvent):
         super(TableMapEvent, self).__init__(packet)
         self._payload = packet[24:]
         self._ctl_conn = ctl_conn
-        
-        # header
         head = self._payload
+        
         head, self.table_id = utils.read_int(head, 6)
+        # add or modify table map.
+        if self.table_id not in table_map:
+            table_map[self.table_id] = {"schema":None, "table":None, "column_schemas":[]}           
+        if self.schema in table_subscribed and self.table in table_subscribed[self.schema]:
+            table_map[self.table_id]["column_schemas"] = \
+               self.__get_table_informations(self.schema, self.table)
+               
         head, self.flags = utils.read_int(head, 2)
         head, schema_name_len = utils.read_int(head, 1)
         head, self.schema = utils.read_bytes(head, schema_name_len)
         self.schema = str(self.schema)
+        table_map[self.table_id]["schema"] = self.schema
         head, _ = utils.read_bytes(head, 1) #filler
         head, table_name_len = utils.read_int(head, 1)
         head, self.table = utils.read_bytes(head, table_name_len)
         self.table = str(self.table)
-        head, _ = utils.read_bytes(head, 1)
+        table_map[self.table_id]["table"] = self.table
+        head, _ = utils.read_bytes(head, 1) #filler
         head, self.columns_cnt = utils.read_lc_int(head)
         head, column_types = utils.read_bytes(head, self.columns_cnt)
-        self.column_types = []
         for i in range(0, self.columns_cnt):
-            self.column_types.append(ord(column_types[i]))
-        #head, self.column_schema = utils.read_lc_string(head)
-        
-        # add or modify table map.
-        if self.table_id not in table_map:
-            table_map[self.table_id] = {"schema":None, "table":None, "column_schemas":[]}
-        table_map[self.table_id]["schema"] = self.schema
-        table_map[self.table_id]["table"] = self.table
-        
-        if self.schema in table_subscribed and self.table in table_subscribed[self.schema]:
-            table_map[self.table_id]["column_schemas"] = \
-               self.__get_table_informations(self.schema, self.table)
+            schema = table_map[self.table_id]["column_schemas"][i]
+            t = ord(column_types[i])
+            schema["TYPE_ID"] = t
+            head, _ = self.__read_metadata(t, schema, head)
             
     def __get_table_informations(self, schema, table):
         sql = '''SELECT * FROM information_schema.columns WHERE table_schema="%s" AND table_name="%s";''', (schema, table)
         res, _ = self._ctl_conn.query(sql)
         return res
     
+    def __read_metadata(self, column_type, column_schema, head):
+        column_schema["REAL_TYPE"] = column_schema["TYPE_ID"]
+        if column_schema["COLUMN_TYPE"].find("unsigned") != -1:
+            column_schema["IS_UNSIGNED"] = True
+        else:
+            column_schema["IS_UNSIGNED"] = False
+        if column_type == FieldType.VAR_STRING or column_type == FieldType.STRING:
+            head, _ = self.__read_string_metadata(column_schema, head)
+        elif column_type == FieldType.VARCHAR:
+            head, column_schema["MAX_LENGTH"] = utils.read_unsigned_int(head, 2)
+        elif column_type == FieldType.BLOB:
+            head, column_schema["LENGTH_SIZE"] = utils.read_unsigned_int(head, 1)
+        elif column_type == FieldType.GEOMETRY:
+            head, column_schema["LENGTH_SIZE"] = utils.read_unsigned_int(head, 1)
+        elif column_type == FieldType.NEWDECIMAL:
+            head, column_schema["PRECISION"] = utils.read_unsigned_int(head, 1)
+            head, column_schema["DECIMALS"] = utils.read_unsigned_int(head, 1)
+        elif column_type == FieldType.DOUBLE:
+            head, column_schema["SIZE"] = utils.read_unsigned_int(head, 1)
+        elif column_type == FieldType.FLOAT:
+            head, column_schema["SIZE"] = utils.read_unsigned_int(head, 1)
+        elif column_type == FieldType.BIT:
+            head, bit = utils.read_unsigned_int(head, 1)
+            head, byte = utils.read_unsigned_int(head, 1)
+            column_schema["BITS"] = (byte * 8) + bit
+            column_schema["BYTES"] = int((bit + 7) / 8)
+        return (head, None)
+ 
+    def __read_string_metadata(self, column_schema, head):
+        head, byte0 = utils.read_unsigned_int(head, 1)
+        head, byte1 = utils.read_unsigned_int(head, 1)
+        metadata  = (byte0 << 8) + byte1
+        real_type = metadata >> 8
+        if real_type == FieldType.SET or real_type == FieldType.ENUM:
+            column_schema["TYPE_ID"] = real_type
+            column_schema["SIZE"] = metadata & 0x00ff
+            self.__read_enum_metadata(column_schema, real_type)
+        else:
+            column_schema["MAX_LENGTH"] = (((metadata >> 4) & 0x300) ^ 0x300) + (metadata & 0x00ff)
+        return (head, None)
+    
+    def __parse_enum_metadata(self, column_schema, column_type):
+        enums = column_schema["TYPE_ID"]
+        if column_type == FieldType.ENUM:
+            column_schema["ENUM_VALUES"] = enums.replace('enum(', '').replace(')', '').replace('\'', '').split(',')
+        else:
+            column_schema["SET_VALUES"] = enums.replace('set(', '').replace(')', '').replace('\'', '').split(',')   
+
     @property
     def table_map(self):
         table_map = {"table_id":self.table_id, \
@@ -185,127 +233,87 @@ class RowsEvent(BinlogEvent):
         #self.schema = self.table_map[self.table_id].schema
         #self.table = self.table_map[self.table_id].table
         
-    def __read_columns(self, buf, null_bitmap, column_schemas):
+    def __read_columns(self, head, null_bitmap, column_schemas):
         columns = []
-        head = buf
         for i in xrange(0, len(columns)):
             schema = column_schemas[i]
             type = schema["REAL_TYPE"]
-            column = {"type":type, "value":None }
+            column = {"type":type, "value":None}
             null = True if (null_bitmap[i/8]>>(i%8))&0x01 else False
             unsigned = column_schemas[i]["IS_UNSIGNED"]
             if null:
                 column["value"] = None
             elif type == FieldType.TINY:
                 if unsigned:
-                    head, columns["value"] = utils.read_int(head, 1)
+                    head, columns["value"] = utils.read_unsigned_int(head, 1, False)
                 else:
-                    head, columns["value"] = utils.read_signed_int(head, 1)
+                    head, columns["value"] = utils.read_signed_int(head, 1, False)
             elif type == FieldType.SHORT:
                 if unsigned:
-                    head, columns["value"] = utils.read_int(head, 2)
+                    head, columns["value"] = utils.read_unsigned_int(head, 2, False)
                 else:
-                    head, columns["value"] = utils.read_signed_int(head, 2)
+                    head, columns["value"] = utils.read_signed_int(head, 2, False)
             elif type == FieldType.LONG:
                 if unsigned:
-                    head, columns["value"] = utils.read_int(head, 4)
+                    head, columns["value"] = utils.read_unsigned_int(head, 4, False)
                 else:
-                    head, columns["value"] = utils.read_signed_int(head, 4)
+                    head, columns["value"] = utils.read_signed_int(head, 4, False)
             elif type == FieldType.INT24:
                 if unsigned:
-                    head, columns["value"] = utils.read_uint24(head)
+                    head, columns["value"] = utils.read_unsigned_int(head, 3, False)
                 else:
-                    head, columns["value"] = utils.read_int24(head)
+                    head, columns["value"] = utils.read_signed_int(head, 3, False)
             elif type == FieldType.FLOAT:
                 head, columns["value"] = utils.read_float(head)
             elif type == FieldType.DOUBLE:
                 head, columns["value"] = utils.read_double(head)
             elif type == FieldType.VARCHAR or column.type == FieldType.STRING:
                 if schema["MAX_LENGTH"] > 255:
-                    head, columns["value"] = utils.read_lc_pascal_string(buf, 2)
+                    head, columns["value"] = utils.read_lc_pascal_string(head, 2)
                 else:
-                    head, columns["value"] = utils.read_lc_pascal_string(buf, 1)
+                    head, columns["value"] = utils.read_lc_pascal_string(head, 1)
             elif type == FieldType.NEWDECIMAL:
-                values[name] = self.__read_new_decimal(column)
+                head, columns["value"] = self.__read_new_decimal(column)
             elif type == FieldType.BLOB:
-                values[name] = self.__read_string(column.length_size, column)
+                length_size = schema["LENGTH_SIZE"]
+                charset = schema["CHARACTER_SET_NAME"]
+                head, columns["value"] = utils.read_lc_pascal_string(head, length_size, charset)
             elif type == FieldType.DATETIME:
-                values[name] = self.__read_datetime()
+                head, columns["value"] = utils.read_datetime(head)
             elif type == FieldType.TIME:
-                values[name] = self.__read_time()
+                head, columns["value"] = utils.read_time(head)
             elif type == FieldType.DATE:
-                values[name] = self.__read_date()
+                head, columns["value"] = utils.read_date(head)
             elif type == FieldType.TIMESTAMP:
-                values[name] = datetime.datetime.fromtimestamp(self.packet.read_uint32())
+                head, timestamp = utils.read_unsigned_int(head, 4)
+                columns["value"] = datetime.datetime.fromtimestamp(timestamp)
             elif type == FieldType.LONGLONG:
                 if unsigned:
-                    values[name] = self.packet.read_uint64()
+                    head, columns["value"] = utils.read_unsigned_int(head, 8, False)
                 else:
-                    values[name] = self.packet.read_int64()
+                    head, columns["value"] = utils.read_signed_int(head, 8, False)
             elif type == FieldType.YEAR:
-                values[name] = self.packet.read_uint8() + 1900
+                head, year = utils.read_unsigned_int(head, 1, False)
+                columns["value"] = year + 1900
             elif type == FieldType.ENUM:
-                values[name] = column.enum_values[self.packet.read_uint_by_size(column.size) - 1]
+                size = schema["SIZE"]
+                head, index = utils.read_unsigned_int(head, size, False) - 1
+                columns["value"] = schema["ENUM_VALUES"][index]
             elif type == FieldType.SET:
-                values[name] = column.set_values[self.packet.read_uint_by_size(column.size) - 1]
+                size = schema["SIZE"]
+                head, index = utils.read_unsigned_int(head, size, False) - 1
+                columns["value"] = schema["SET_VALUES"][index]
             elif type == FieldType.BIT:
-                values[name] = self.__read_bit(column)
+                bytes = schema["BYTES"]
+                bits = schema["BITS"]
+                head, columns["value"] = utils.read_bits(head, bytes, bits)
             elif type == FieldType.GEOMETRY:
-                values[name] = self.packet.read_length_coded_pascal_string(column.length_size)
+                length_size = schema["LENGTH_SIZE"]
+                head, columns["value"] = utils.read_lc_pascal_string(head, length_size)
             else:
-                raise NotImplementedError("Unknown MySQL column type: %d" % (column.type))
-        return values
-
-
-"""
-type == FieldType.TINY:
-                head, column = utils.read_int(head, 1)
-            elif type == FieldType.SHORT:
-                head, column = utils.read_int(head, 2)
-            elif type == FieldType.LONG:
-                head, column = utils.read_int(head, 4)
-            elif type == FieldType.INT24:
-                head, column = utils.read_int(head, 3)
-            elif type == FieldType.FLOAT:
-                head, column = utils.read_bytes(head, 4)
-                column = struct.unpack('f', column)
-            elif type == FieldType.DOUBLE:
-                head, column = utils.read_bytes(head, 8)
-                column = struct.unpack('d', column)
-            elif type == FieldType.VARCHAR or type == FieldType.STRING:
-                head, column = utils.read_lc_string(head)
-            elif column.type == FieldType.NEWDECIMAL:
-                #head, cloumn = utils.
-                values[name] = self.__read_new_decimal(column)
-            elif column.type == FieldType.BLOB:
-                values[name] = self.__read_string(column.length_size, column)
-            elif column.type == FieldType.DATETIME:
-                values[name] = self.__read_datetime()
-            elif column.type == FIELD_TYPE.TIME:
-                values[name] = self.__read_time()
-            elif column.type == FIELD_TYPE.DATE:
-                values[name] = self.__read_date()
-            elif column.type == FIELD_TYPE.TIMESTAMP:
-                values[name] = datetime.datetime.fromtimestamp(self.packet.read_uint32())
-            elif column.type == FIELD_TYPE.LONGLONG:
-                if unsigned:
-                    values[name] = self.packet.read_uint64()
-                else:
-                    values[name] = self.packet.read_int64()
-            elif column.type == FIELD_TYPE.YEAR:
-                values[name] = self.packet.read_uint8() + 1900
-            elif column.type == FIELD_TYPE.ENUM:
-                values[name] = column.enum_values[self.packet.read_uint_by_size(column.size) - 1]
-            elif column.type == FIELD_TYPE.SET:
-                values[name] = column.set_values[self.packet.read_uint_by_size(column.size) - 1]
-            elif column.type == FIELD_TYPE.BIT:
-                values[name] = self.__read_bit(column)
-            elif column.type == FIELD_TYPE.GEOMETRY:
-                values[name] = self.packet.read_length_coded_pascal_string(column.length_size)
-            else:
-                raise NotImplementedError("Unknown MySQL column type: %d" % (column.type))
-"""
-
+                raise NotImplementedError("Unknown MySQL column type: %d" % (type))
+            columns.append(column)
+        return columns
 
 """  
 class RotateEvent(BinLogEvent):
